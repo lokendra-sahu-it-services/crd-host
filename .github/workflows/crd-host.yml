@@ -1,3 +1,4 @@
+
 name: CRD Host
 
 on:
@@ -41,12 +42,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
           export DEBIAN_FRONTEND=noninteractive
 
           sudo apt-get update -qq
 
-          # Basic XFCE Desktop + File Manager + Terminal
+          # Minimal XFCE + File Manager + Terminal
           sudo apt-get install -y --no-install-recommends \
             dbus-x11 \
             xfce4-session \
@@ -63,7 +63,7 @@ jobs:
             -o google-chrome.deb \
             https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
 
-          # Download Chrome Remote Desktop
+          # Download CRD
           curl -fsSL --retry 3 \
             -o chrome-remote-desktop.deb \
             https://dl.google.com/linux/direct/chrome-remote-desktop_current_amd64.deb
@@ -75,18 +75,24 @@ jobs:
 
           rm -f google-chrome.deb chrome-remote-desktop.deb
 
-          # Configure XFCE session
+          # Configure desktop
           echo "exec /usr/bin/xfce4-session" \
             > "$HOME/.chrome-remote-desktop-session"
 
-      - name: Remove Unwanted Applications
+          echo "CRD desktop installed."
+
+      - name: Remove Unwanted Runner Tools
         shell: bash
         run: |
           set -euo pipefail
-
           export DEBIAN_FRONTEND=noninteractive
 
-          # Remove only if package is actually installed
+          # Remove standalone CMake binary
+          if [[ -f /usr/local/bin/cmake ]]; then
+            sudo rm -f /usr/local/bin/cmake
+          fi
+
+          # Remove unwanted APT applications if installed
           packages=(
             firefox
             firefox-esr
@@ -110,10 +116,7 @@ jobs:
           done
 
           if ((${#remove[@]})); then
-            echo "Removing: ${remove[*]}"
             sudo apt-get purge -y "${remove[@]}"
-          else
-            echo "No matching unwanted packages found."
           fi
 
           # Remove Firefox snap if present
@@ -121,18 +124,14 @@ jobs:
             sudo snap remove firefox
           fi
 
-          # Hide unwanted menu launchers without removing Thunar
-          for dir in /usr/share/applications /usr/local/share/applications; do
-            if [[ -d "$dir" ]]; then
-              sudo find "$dir" -maxdepth 1 -type f \
-                \( -iname '*bulk*rename*.desktop' \
-                   -o -iname '*texinfo*.desktop' \) -delete
-            fi
-          done
+          # Verify CMake
+          if command -v cmake >/dev/null 2>&1; then
+            echo "CMake still exists at: $(command -v cmake)"
+          else
+            echo "CMake successfully removed."
+          fi
 
           sudo apt-get clean
-
-          echo "Unwanted application cleanup completed."
 
       - name: Audit Newly Installed Packages
         shell: bash
@@ -147,9 +146,9 @@ jobs:
             <(cut -f2 /tmp/packages-before.txt | sort) \
             <(cut -f2 /tmp/packages-after.txt | sort)
 
-          echo "===== REMAINING UNWANTED APPS ====="
-          for app in firefox firefox-esr microsoft-edge-stable cmake vim vim-tiny texinfo info; do
-            dpkg-query -W -f='${db:Status-Abbrev} ${binary:Package} ${Version}\n' \
+          echo "===== UNWANTED APPLICATION CHECK ====="
+          for app in firefox firefox-esr microsoft-edge-stable cmake; do
+            dpkg-query -W -f='${db:Status-Abbrev} ${binary:Package}\n' \
               "$app" 2>/dev/null || true
           done
 
@@ -264,6 +263,9 @@ jobs:
 
           echo "===== DESKTOP PROCESSES ====="
           pgrep -af 'thunar|xfce4-panel|xfdesktop' || true
+
+          echo "===== CMAKE CHECK ====="
+          command -v cmake || echo "CMake not found"
 
           echo "===== DISK USAGE ====="
           df -h
