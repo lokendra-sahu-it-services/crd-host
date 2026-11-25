@@ -1,4 +1,3 @@
-
 name: CRD Host
 
 on:
@@ -47,7 +46,7 @@ jobs:
 
           sudo apt-get update -qq
 
-          # Basic XFCE desktop + File Manager + Terminal
+          # Basic XFCE Desktop + File Manager + Terminal
           sudo apt-get install -y --no-install-recommends \
             dbus-x11 \
             xfce4-session \
@@ -59,7 +58,7 @@ jobs:
             xfce4-terminal \
             x11-xserver-utils
 
-          # Download Google Chrome
+          # Download Chrome
           curl -fsSL --retry 3 \
             -o google-chrome.deb \
             https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
@@ -69,7 +68,7 @@ jobs:
             -o chrome-remote-desktop.deb \
             https://dl.google.com/linux/direct/chrome-remote-desktop_current_amd64.deb
 
-          # Install Chrome + CRD with required dependencies only
+          # Install Chrome + CRD
           sudo apt-get install -y --no-install-recommends \
             ./google-chrome.deb \
             ./chrome-remote-desktop.deb
@@ -80,11 +79,60 @@ jobs:
           echo "exec /usr/bin/xfce4-session" \
             > "$HOME/.chrome-remote-desktop-session"
 
-          # Clean package cache
-          sudo apt-get clean
-          sudo rm -rf /var/lib/apt/lists/*
+      - name: Remove Unwanted Applications
+        shell: bash
+        run: |
+          set -euo pipefail
 
-          echo "Minimal CRD desktop installation completed."
+          export DEBIAN_FRONTEND=noninteractive
+
+          # Remove only if package is actually installed
+          packages=(
+            firefox
+            firefox-esr
+            microsoft-edge-stable
+            cmake
+            vim
+            vim-tiny
+            vim-runtime
+            texinfo
+            info
+          )
+
+          remove=()
+
+          for pkg in "${packages[@]}"; do
+            status="$(dpkg-query -W -f='${db:Status-Abbrev}' "$pkg" 2>/dev/null || true)"
+
+            if [[ "$status" == ii* ]]; then
+              remove+=("$pkg")
+            fi
+          done
+
+          if ((${#remove[@]})); then
+            echo "Removing: ${remove[*]}"
+            sudo apt-get purge -y "${remove[@]}"
+          else
+            echo "No matching unwanted packages found."
+          fi
+
+          # Remove Firefox snap if present
+          if command -v snap >/dev/null 2>&1 && snap list firefox >/dev/null 2>&1; then
+            sudo snap remove firefox
+          fi
+
+          # Hide unwanted menu launchers without removing Thunar
+          for dir in /usr/share/applications /usr/local/share/applications; do
+            if [[ -d "$dir" ]]; then
+              sudo find "$dir" -maxdepth 1 -type f \
+                \( -iname '*bulk*rename*.desktop' \
+                   -o -iname '*texinfo*.desktop' \) -delete
+            fi
+          done
+
+          sudo apt-get clean
+
+          echo "Unwanted application cleanup completed."
 
       - name: Audit Newly Installed Packages
         shell: bash
@@ -99,9 +147,15 @@ jobs:
             <(cut -f2 /tmp/packages-before.txt | sort) \
             <(cut -f2 /tmp/packages-after.txt | sort)
 
+          echo "===== REMAINING UNWANTED APPS ====="
+          for app in firefox firefox-esr microsoft-edge-stable cmake vim vim-tiny texinfo info; do
+            dpkg-query -W -f='${db:Status-Abbrev} ${binary:Package} ${Version}\n' \
+              "$app" 2>/dev/null || true
+          done
+
           echo "===== PACKAGE COUNTS ====="
           echo "Before: $(wc -l < /tmp/packages-before.txt)"
-          echo "After:  $(wc -l < /tmp/packages-after.txt)"
+          echo "After: $(wc -l < /tmp/packages-after.txt)"
 
       - name: Register CRD Host
         shell: bash
