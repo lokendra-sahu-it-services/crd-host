@@ -1,82 +1,183 @@
+
 name: "Quick Chrome Remote Desktop Host (3 Hours)"
 
-    on:
-      workflow_dispatch:
-        inputs:
-          crd_code:
-            description: 'Google CRD Auth Command / Code (from remotedesktop.google.com/headless)'
-            required: true
-            type: string
-          crd_pin:
-            description: '6-digit PIN for CRD Access'
-            required: true
-            default: '123456'
+on:
+  workflow_dispatch:
+    inputs:
+      crd_code:
+        description: "Google CRD Auth Command (from remotedesktop.google.com/headless)"
+        required: true
+        type: string
+      crd_pin:
+        description: "6-digit CRD Access PIN"
+        required: true
+        type: string
 
-    jobs:
-      launch-crd:
-        name: "Start CRD Environment"
-        runs-on: ubuntu-latest
-        timeout-minutes: 200
+permissions:
+  contents: read
 
-        steps:
-          - name: Freeing Runner Disk Space
-            run: |
-              sudo rm -rf /usr/share/dotnet /etc/mysql /var/lib/mysql
-              docker system prune -af || true
+concurrency:
+  group: crd-host-session
+  cancel-in-progress: true
 
-          - name: Install Desktop Environment & Chrome
-            run: |
-              set -euo pipefail
-              sudo apt-get update -qq
-              
-              # Install XFCE Desktop (Lightweight & Super Fast)
-              sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-                xfce4 xfce4-terminal dbus-x11 desktop-base xscreensaver xbase-clients
+jobs:
+  launch-crd:
+    name: "Start CRD Environment"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
 
-              # Install Google Chrome
-              wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
-              sudo apt-get install -y ./google-chrome-stable_current_amd64.deb
-              rm google-chrome-stable_current_amd64.deb
+    steps:
+      - name: Check Runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "OS:"
+          lsb_release -ds
+          echo "CPU:"
+          nproc
+          echo "Memory:"
+          free -h
+          echo "Disk:"
+          df -h /
 
-              # Install Chrome Remote Desktop
-              wget -q https://dl.google.com/linux/direct/chrome-remote-desktop_current_amd64.deb
-              sudo apt-get install -y ./chrome-remote-desktop_current_amd64.deb
-              rm chrome-remote-desktop_current_amd64.deb
+      - name: Install XFCE Desktop
+        shell: bash
+        run: |
+          set -euo pipefail
 
-              # Setup Session Desktop for runner user
-              sudo bash -c 'echo "exec /etc/X11/Xsession /usr/bin/xfce4-session" > /etc/chrome-remote-desktop-session'
-    
-          - name: Configure and Start CRD
-            env:
-              CRD_COMMAND: ${{ github.event.inputs.crd_code }}
-              CRD_PIN: ${{ github.event.inputs.crd_pin }}
-            run: |
-              USER_NAME=$(whoami)
-              sudo usermod -aG chrome-remote-desktop "$USER_NAME"
+          sudo apt-get update -qq
 
-              echo "Configuring CRD..."
-              eval "$CRD_COMMAND --pin=$CRD_PIN"
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            --no-install-recommends \
+            xfce4 \
+            xfce4-terminal \
+            desktop-base \
+            dbus-x11 \
+            xscreensaver \
+            curl \
+            ca-certificates
 
-              sudo systemctl restart chrome-remote-desktop@$USER_NAME.service || true
+          sudo bash -c \
+            'echo "exec /etc/X11/Xsession /usr/bin/xfce4-session" > /etc/chrome-remote-desktop-session'
 
-              echo "=========================================="
-              echo " CRD is now ONLINE!"
-              echo " Connect at: https://remotedesktop.google.com/access"
-              echo " PIN: $CRD_PIN"
-              echo "=========================================="
+          sudo systemctl disable lightdm.service 2>/dev/null || true
 
-          - name: Keep Alive Loop (3 Hours)
-            run: |
-              echo "Keeping runner alive for 3 Hours (180 minutes)..."
-              TOTAL_SECONDS=10800
-              INTERVAL=60
-              ELAPSED=0
+      - name: Install Google Chrome
+        shell: bash
+        run: |
+          set -euo pipefail
 
-              while [ "$ELAPSED" -lt "$TOTAL_SECONDS" ]; do
-                REMAINING=$(( (TOTAL_SECONDS - ELAPSED) / 60 ))
-                echo "Session Active... Remaining Time: ${REMAINING} minutes"
-                sleep $INTERVAL
-                ELAPSED=$((ELAPSED + INTERVAL))
-              done
+          cd /tmp
 
-              echo "3 Hours limit reached. Exiting gracefully."
+          curl -fL --retry 3 \
+            -o google-chrome.deb \
+            https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+
+          sudo apt-get install -y --fix-broken ./google-chrome.deb
+
+          rm -f google-chrome.deb
+
+          google-chrome --version
+
+      - name: Install Chrome Remote Desktop
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd /tmp
+
+          curl -fL --retry 3 \
+            -o chrome-remote-desktop.deb \
+            https://dl.google.com/linux/direct/chrome-remote-desktop_current_amd64.deb
+
+          sudo apt-get install -y --fix-broken ./chrome-remote-desktop.deb
+
+          rm -f chrome-remote-desktop.deb
+
+          dpkg-query -W chrome-remote-desktop
+
+      - name: Configure and Start CRD
+        shell: bash
+        env:
+          CRD_COMMAND: ${{ inputs.crd_code }}
+          CRD_PIN: ${{ inputs.crd_pin }}
+        run: |
+          set -euo pipefail
+
+          CRD_USER="$(id -un)"
+
+          # Validate PIN
+          if [[ ! "$CRD_PIN" =~ ^[0-9]{6}$ ]]; then
+            echo "::error::PIN must contain exactly 6 digits."
+            exit 1
+          fi
+
+          # Validate the Google-generated command
+          if [[ "$CRD_COMMAND" != *"/opt/google/chrome-remote-desktop/start-host"* ]]; then
+            echo "::error::Invalid CRD command. Generate a fresh command from Google."
+            exit 1
+          fi
+
+          echo "Starting Chrome Remote Desktop..."
+
+          # Google-generated authorization command
+          # Do not print this command: it contains a one-time authorization code.
+          eval "$CRD_COMMAND --pin=$CRD_PIN"
+
+          echo "Waiting for CRD service..."
+
+          sudo systemctl restart \
+            "chrome-remote-desktop@${CRD_USER}.service"
+
+          sleep 5
+
+          if ! sudo systemctl is-active --quiet \
+            "chrome-remote-desktop@${CRD_USER}.service"; then
+
+            echo "::error::Chrome Remote Desktop service failed."
+
+            sudo systemctl status \
+              "chrome-remote-desktop@${CRD_USER}.service" \
+              --no-pager || true
+
+            exit 1
+          fi
+
+          echo "=================================="
+          echo "CRD HOST IS ONLINE"
+          echo "=================================="
+          echo "User: $CRD_USER"
+          echo "Access: https://remotedesktop.google.com/access"
+          echo "PIN is configured (not displayed)."
+          echo "=================================="
+
+      - name: Keep Alive (3 Hours)
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TOTAL_SECONDS=10800
+          INTERVAL=60
+          ELAPSED=0
+
+          echo "CRD session started. Maximum duration: 180 minutes."
+
+          while (( ELAPSED < TOTAL_SECONDS )); do
+            REMAINING=$(( (TOTAL_SECONDS - ELAPSED) / 60 ))
+
+            echo "CRD ONLINE | Remaining: ${REMAINING} minutes"
+
+            sleep "$INTERVAL"
+            ELAPSED=$(( ELAPSED + INTERVAL ))
+          done
+
+          echo "3-hour session completed."
+
+      - name: Final CRD Status
+        if: always()
+        shell: bash
+        run: |
+          echo "Runner shutdown / session status:"
+          sudo systemctl status \
+            "chrome-remote-desktop@$(id -un).service" \
+            --no-pager || true
