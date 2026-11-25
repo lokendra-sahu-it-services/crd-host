@@ -33,16 +33,12 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "===== OS VERSION ====="
-          cat /etc/os-release
-
           dpkg-query -W -f='${db:Status-Abbrev}\t${binary:Package}\t${Version}\n' \
             | awk '$1=="ii"' | sort > /tmp/packages-before.txt
 
-          echo "===== PACKAGE COUNT BEFORE ====="
-          wc -l < /tmp/packages-before.txt
+          echo "Packages before: $(wc -l < /tmp/packages-before.txt)"
 
-      - name: Install Minimal Desktop, Chrome and CRD
+      - name: Install Minimal CRD Desktop
         shell: bash
         run: |
           set -euo pipefail
@@ -51,35 +47,36 @@ jobs:
 
           sudo apt-get update -qq
 
-          # Minimal XFCE components
+          # Basic XFCE desktop + File Manager + Terminal
           sudo apt-get install -y --no-install-recommends \
             dbus-x11 \
             xfce4-session \
             xfce4-panel \
             xfdesktop4 \
             xfwm4 \
-            xfce4-terminal \
+            xfce4-settings \
             thunar \
+            xfce4-terminal \
             x11-xserver-utils
 
-          # Download Chrome
-          curl -fL --retry 3 \
+          # Download Google Chrome
+          curl -fsSL --retry 3 \
             -o google-chrome.deb \
             https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
 
           # Download Chrome Remote Desktop
-          curl -fL --retry 3 \
+          curl -fsSL --retry 3 \
             -o chrome-remote-desktop.deb \
             https://dl.google.com/linux/direct/chrome-remote-desktop_current_amd64.deb
 
-          # Install Chrome, CRD and required dependencies
+          # Install Chrome + CRD with required dependencies only
           sudo apt-get install -y --no-install-recommends \
             ./google-chrome.deb \
             ./chrome-remote-desktop.deb
 
           rm -f google-chrome.deb chrome-remote-desktop.deb
 
-          # Configure XFCE
+          # Configure XFCE session
           echo "exec /usr/bin/xfce4-session" \
             > "$HOME/.chrome-remote-desktop-session"
 
@@ -87,9 +84,9 @@ jobs:
           sudo apt-get clean
           sudo rm -rf /var/lib/apt/lists/*
 
-          echo "Minimal Chrome + CRD installation completed."
+          echo "Minimal CRD desktop installation completed."
 
-      - name: Audit Packages After Installation
+      - name: Audit Newly Installed Packages
         shell: bash
         run: |
           set -euo pipefail
@@ -105,12 +102,6 @@ jobs:
           echo "===== PACKAGE COUNTS ====="
           echo "Before: $(wc -l < /tmp/packages-before.txt)"
           echo "After:  $(wc -l < /tmp/packages-after.txt)"
-
-          echo "===== EDGE / FIREFOX / CMAKE / RENAME CHECK ====="
-          dpkg-query -W '*edge*' '*firefox*' '*cmake*' '*rename*' 2>/dev/null || true
-
-          echo "===== COMPLETE INSTALLED PACKAGE LIST ====="
-          cat /tmp/packages-after.txt
 
       - name: Register CRD Host
         shell: bash
@@ -216,6 +207,9 @@ jobs:
         run: |
           echo "===== CRD PROCESSES ====="
           pgrep -af 'chrome-remote-desktop|xfce4-session|xfwm4' || true
+
+          echo "===== DESKTOP PROCESSES ====="
+          pgrep -af 'thunar|xfce4-panel|xfdesktop' || true
 
           echo "===== DISK USAGE ====="
           df -h
