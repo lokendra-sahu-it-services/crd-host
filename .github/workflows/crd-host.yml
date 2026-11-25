@@ -1,5 +1,5 @@
 name: "Quick Chrome Remote Desktop Host (3 Hours)"
-    
+
     on:
       workflow_dispatch:
         inputs:
@@ -11,19 +11,19 @@ name: "Quick Chrome Remote Desktop Host (3 Hours)"
             description: '6-digit PIN for CRD Access'
             required: true
             default: '123456'
-    
+
     jobs:
       launch-crd:
         name: "Start CRD Environment"
         runs-on: ubuntu-latest
-        timeout-minutes: 200 # 3.3 hours (GitHub free limit max 360 mins)
-    
+        timeout-minutes: 200
+
         steps:
           - name: Freeing Runner Disk Space
             run: |
               sudo rm -rf /usr/share/dotnet /etc/mysql /var/lib/mysql
               docker system prune -af || true
-    
+
           - name: Install Desktop Environment & Chrome
             run: |
               set -euo pipefail
@@ -32,17 +32,17 @@ name: "Quick Chrome Remote Desktop Host (3 Hours)"
               # Install XFCE Desktop (Lightweight & Super Fast)
               sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
                 xfce4 xfce4-terminal dbus-x11 desktop-base xscreensaver xbase-clients
-    
+
               # Install Google Chrome
               wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
-              sudo apt install -y ./google-chrome-stable_current_amd64.deb
+              sudo apt-get install -y ./google-chrome-stable_current_amd64.deb
               rm google-chrome-stable_current_amd64.deb
-    
+
               # Install Chrome Remote Desktop
               wget -q https://dl.google.com/linux/direct/chrome-remote-desktop_current_amd64.deb
-              sudo apt install -y ./chrome-remote-desktop_current_amd64.deb
+              sudo apt-get install -y ./chrome-remote-desktop_current_amd64.deb
               rm chrome-remote-desktop_current_amd64.deb
-    
+
               # Setup Session Desktop for runner user
               sudo bash -c 'echo "exec /etc/X11/Xsession /usr/bin/xfce4-session" > /etc/chrome-remote-desktop-session'
     
@@ -51,37 +51,32 @@ name: "Quick Chrome Remote Desktop Host (3 Hours)"
               CRD_COMMAND: ${{ github.event.inputs.crd_code }}
               CRD_PIN: ${{ github.event.inputs.crd_pin }}
             run: |
-              # User Setup
               USER_NAME=$(whoami)
               sudo usermod -aG chrome-remote-desktop "$USER_NAME"
-    
+
               echo "Configuring CRD..."
-              # Execute the command provided by user with PIN
               eval "$CRD_COMMAND --pin=$CRD_PIN"
-    
-              # Start system service
+
               sudo systemctl restart chrome-remote-desktop@$USER_NAME.service || true
-    
+
               echo "=========================================="
               echo " CRD is now ONLINE!"
               echo " Connect at: https://remotedesktop.google.com/access"
               echo " PIN: $CRD_PIN"
               echo "=========================================="
-    
+
           - name: Keep Alive Loop (3 Hours)
             run: |
               echo "Keeping runner alive for 3 Hours (180 minutes)..."
-              
-              # 3 Hours = 180 minutes * 60 = 10800 seconds
               TOTAL_SECONDS=10800
               INTERVAL=60
               ELAPSED=0
-    
+
               while [ "$ELAPSED" -lt "$TOTAL_SECONDS" ]; do
                 REMAINING=$(( (TOTAL_SECONDS - ELAPSED) / 60 ))
                 echo "Session Active... Remaining Time: ${REMAINING} minutes"
                 sleep $INTERVAL
                 ELAPSED=$((ELAPSED + INTERVAL))
               done
-    
+
               echo "3 Hours limit reached. Exiting gracefully."
