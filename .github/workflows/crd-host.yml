@@ -1,16 +1,17 @@
 
-name: "Quick Chrome Remote Desktop Host (3 Hours)"
+name: CRD Host
 
 on:
   workflow_dispatch:
     inputs:
       crd_code:
-        description: "Google CRD Auth Command from remotedesktop.google.com/headless"
+        description: "Google CRD start-host command"
         required: true
         type: string
       crd_pin:
-        description: "6-digit CRD Access PIN"
+        description: "CRD PIN"
         required: true
+        default: "123456"
         type: string
 
 permissions:
@@ -21,112 +22,42 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  launch-crd:
-    name: "Start Chrome Remote Desktop"
+  host:
+    name: Deploy CRD Host
     runs-on: ubuntu-26.04
     timeout-minutes: 240
 
     steps:
-      - name: Check Runner Environment
+      - name: Install Desktop and CRD
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "===== RUNNER INFORMATION ====="
-          lsb_release -a
-          uname -r
-          nproc
-          free -h
-          df -h /
+          sudo apt-get update
 
-          echo "===== CHECK REQUIRED LIBRARY ====="
-          LIB_VERSION=$(dpkg-query -W -f='${Version}' libxtst6)
-
-          echo "libxtst6: $LIB_VERSION"
-
-          dpkg --compare-versions "$LIB_VERSION" ge "2:1.2.5" || {
-            echo "::error::libxtst6 1.2.5 or newer is required."
-            exit 1
-          }
-
-      - name: Install XFCE Desktop
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          sudo apt-get update -qq
-
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            --no-install-recommends \
+          sudo apt-get install -y \
             xfce4 \
-            xfce4-session \
-            xfce4-terminal \
+            xfce4-goodies \
             dbus-x11 \
             x11-xserver-utils \
-            xauth \
-            xscreensaver \
-            curl \
-            ca-certificates \
             wget \
-            sudo
+            curl \
+            python3
 
-          echo "XFCE installation completed."
+          # Install Google Chrome
+          wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+          sudo apt-get install -y ./google-chrome-stable_current_amd64.deb
 
-          mkdir -p "$HOME"
+          # Install Chrome Remote Desktop
+          wget -q https://dl.google.com/linux/direct/chrome-remote-desktop_current_amd64.deb
+          sudo apt-get install -y ./chrome-remote-desktop_current_amd64.deb
 
-          echo "exec /etc/X11/Xsession /usr/bin/xfce4-session" \
-            > "$HOME/.chrome-remote-desktop-session"
+          # Configure XFCE session
+          echo "exec /usr/bin/xfce4-session" > "$HOME/.chrome-remote-desktop-session"
 
-          chmod 644 "$HOME/.chrome-remote-desktop-session"
+          echo "Desktop and CRD installed successfully."
 
-      - name: Install Google Chrome
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          cd /tmp
-
-          curl -fL --retry 3 \
-            -o google-chrome.deb \
-            https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
-
-          sudo apt-get install -y ./google-chrome.deb
-
-          rm -f google-chrome.deb
-
-          google-chrome --version
-
-      - name: Install Chrome Remote Desktop
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          cd /tmp
-
-          echo "Checking CRD dependency..."
-
-          LIB_VERSION=$(dpkg-query -W -f='${Version}' libxtst6)
-
-          dpkg --compare-versions "$LIB_VERSION" ge "2:1.2.5" || {
-            echo "::error::Incompatible libxtst6 version: $LIB_VERSION"
-            exit 1
-          }
-
-          curl -fL --retry 3 \
-            -o chrome-remote-desktop.deb \
-            https://dl.google.com/linux/direct/chrome-remote-desktop_current_amd64.deb
-
-          sudo apt-get install -y ./chrome-remote-desktop.deb
-
-          rm -f chrome-remote-desktop.deb
-
-          echo "===== CRD PACKAGE VERIFIED ====="
-
-          dpkg-query -W chrome-remote-desktop
-
-          test -x /opt/google/chrome-remote-desktop/start-host
-
-      - name: Configure and Start CRD
+      - name: Register CRD Host
         shell: bash
         env:
           CRD_COMMAND: ${{ inputs.crd_code }}
@@ -134,125 +65,90 @@ jobs:
         run: |
           set -euo pipefail
 
-          CRD_USER="$(id -un)"
-
-          echo "Validating configuration..."
-
-          if [[ ! "$CRD_PIN" =~ ^[0-9]{6}$ ]]; then
-            echo "::error::PIN must contain exactly 6 digits."
+          # Validate PIN
+          if [[ ! "$CRD_PIN" =~ ^[0-9]{6,12}$ ]]; then
+            echo "Invalid CRD PIN."
             exit 1
           fi
 
-          if [[ "$CRD_COMMAND" != *"/opt/google/chrome-remote-desktop/start-host"* ]]; then
-            echo "::error::Invalid Google CRD authorization command."
-            exit 1
-          fi
+          # Parse trusted Google command without eval.
+          python3 - <<'PY'
+          import os
+          import shlex
+          import subprocess
+          import sys
 
-          if [[ "$CRD_COMMAND" == *"--pin="* ]]; then
-            echo "::error::Remove any existing --pin argument. Enter the original Google command."
-            exit 1
-          fi
+          command = os.environ["CRD_COMMAND"]
+          pin = os.environ["CRD_PIN"]
 
-          echo "Configuring XFCE session..."
+          try:
+              args = shlex.split(command)
+          except ValueError:
+              sys.exit("Invalid command format.")
 
-          echo "exec /etc/X11/Xsession /usr/bin/xfce4-session" \
-            > "$HOME/.chrome-remote-desktop-session"
+          # Google command may start with DISPLAY=
+          if args and args[0].startswith("DISPLAY="):
+              args.pop(0)
 
-          chmod 600 "$HOME/.chrome-remote-desktop-session"
+          expected = "/opt/google/chrome-remote-desktop/start-host"
 
-          echo "Executing Google authorization command..."
+          if not args or args[0] != expected:
+              sys.exit("Invalid Google CRD start-host command.")
 
-          # CRD authorization code is sensitive.
-          # Never print the command in workflow logs.
+          # Remove any supplied name/PIN so our fixed values win.
+          clean = []
+          skip_next = False
 
-          eval "$CRD_COMMAND --pin=\"$CRD_PIN\""
+          for arg in args:
+              if skip_next:
+                  skip_next = False
+                  continue
 
-          echo "Checking CRD service..."
+              if arg in ("--name", "--pin"):
+                  skip_next = True
+                  continue
 
-          SERVICE="chrome-remote-desktop@${CRD_USER}.service"
+              if arg.startswith("--name=") or arg.startswith("--pin="):
+                  continue
 
-          # start-host normally enables and starts this service.
-          # Retry service startup if required.
+              clean.append(arg)
 
-          if ! sudo systemctl is-active --quiet "$SERVICE"; then
-            sudo systemctl enable "$SERVICE"
-            sudo systemctl restart "$SERVICE"
-          fi
+          clean.extend([
+              "--name=Lokendra-CRD",
+              f"--pin={pin}"
+          ])
 
-          sleep 5
+          env = os.environ.copy()
+          env["DISPLAY"] = ""
 
-          if ! sudo systemctl is-active --quiet "$SERVICE"; then
-            echo "::error::CRD service failed to start."
+          print("Registering CRD host: Lokendra-CRD")
 
-            sudo systemctl status "$SERVICE" --no-pager || true
+          result = subprocess.run(clean, env=env)
 
-            sudo journalctl -u "$SERVICE" -n 80 --no-pager || true
+          if result.returncode != 0:
+              sys.exit("CRD host registration failed.")
 
-            exit 1
-          fi
+          print("CRD host registration command completed.")
+          PY
 
-          echo "=================================="
-          echo "CHROME REMOTE DESKTOP IS ONLINE"
-          echo "=================================="
-          echo "User: $CRD_USER"
-          echo "Desktop: XFCE"
-          echo "Service: ACTIVE"
-          echo "Access: https://remotedesktop.google.com/access"
-          echo "PIN: Configured (hidden)"
-          echo "=================================="
-
-      - name: Keep Alive (3 Hours)
+      - name: Keep Host Running
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
 
-          TOTAL_SECONDS=10800
-          INTERVAL=60
-          ELAPSED=0
+          echo "CRD host is running."
+          echo "Remote device name: Lokendra-CRD"
 
-          SERVICE="chrome-remote-desktop@$(id -un).service"
-
-          echo "Starting 3-hour CRD session..."
-
-          while (( ELAPSED < TOTAL_SECONDS )); do
-
-            if ! sudo systemctl is-active --quiet "$SERVICE"; then
-              echo "::error::CRD service stopped unexpectedly."
-
-              sudo systemctl status "$SERVICE" --no-pager || true
-
-              sudo journalctl -u "$SERVICE" -n 60 --no-pager || true
-
-              exit 1
-            fi
-
-            REMAINING=$(( (TOTAL_SECONDS - ELAPSED) / 60 ))
-
-            echo "CRD ONLINE | Remaining: ${REMAINING} minutes"
-
-            sleep "$INTERVAL"
-
-            ELAPSED=$(( ELAPSED + INTERVAL ))
-
+          for i in $(seq 1 225); do
+            sleep 60
           done
 
-          echo "3-hour session completed successfully."
+          echo "CRD session time completed."
 
-      - name: Final CRD Diagnostics
+      - name: Diagnostics
         if: always()
         shell: bash
         run: |
-          echo "===== FINAL CRD STATUS ====="
-
-          SERVICE="chrome-remote-desktop@$(id -un).service"
-
-          sudo systemctl status "$SERVICE" --no-pager || true
-
-          echo "===== RECENT CRD LOGS ====="
-
-          sudo journalctl -u "$SERVICE" -n 40 --no-pager || true
-
-          echo "===== SYSTEM RESOURCES ====="
-
-          free -h
+          echo "CRD diagnostics:"
+          pgrep -af 'chrome-remote-desktop|xfce4-session' || true
           df -h /
