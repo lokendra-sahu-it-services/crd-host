@@ -28,25 +28,35 @@ jobs:
     timeout-minutes: 240
 
     steps:
+      # -----------------------------------------------
+      # 1. AUDIT BASE RUNNER
+      # -----------------------------------------------
       - name: Audit Packages Before Installation
         shell: bash
         run: |
           set -euo pipefail
+
+          echo "===== OS VERSION ====="
+          cat /etc/os-release
 
           dpkg-query -W -f='${db:Status-Abbrev}\t${binary:Package}\t${Version}\n' \
             | awk '$1=="ii"' | sort > /tmp/packages-before.txt
 
           echo "Packages before: $(wc -l < /tmp/packages-before.txt)"
 
+      # -----------------------------------------------
+      # 2. INSTALL MINIMAL DESKTOP
+      # -----------------------------------------------
       - name: Install Minimal CRD Desktop
         shell: bash
         run: |
           set -euo pipefail
+
           export DEBIAN_FRONTEND=noninteractive
 
           sudo apt-get update -qq
 
-          # Minimal XFCE + File Manager + Terminal
+          # Basic XFCE + File Manager + Terminal
           sudo apt-get install -y --no-install-recommends \
             dbus-x11 \
             xfce4-session \
@@ -58,46 +68,50 @@ jobs:
             xfce4-terminal \
             x11-xserver-utils
 
-          # Download Chrome
+          # Download Google Chrome
           curl -fsSL --retry 3 \
             -o google-chrome.deb \
             https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
 
-          # Download CRD
+          # Download Chrome Remote Desktop
           curl -fsSL --retry 3 \
             -o chrome-remote-desktop.deb \
             https://dl.google.com/linux/direct/chrome-remote-desktop_current_amd64.deb
 
-          # Install Chrome + CRD
+          # Install Chrome + CRD and required dependencies
           sudo apt-get install -y --no-install-recommends \
             ./google-chrome.deb \
             ./chrome-remote-desktop.deb
 
           rm -f google-chrome.deb chrome-remote-desktop.deb
 
-          # Configure desktop
+          # Configure XFCE session
           echo "exec /usr/bin/xfce4-session" \
             > "$HOME/.chrome-remote-desktop-session"
 
-          echo "CRD desktop installed."
+          echo "Minimal CRD desktop installed."
 
-      - name: Remove Unwanted Runner Tools
+      # -----------------------------------------------
+      # 3. REMOVE UNWANTED APPLICATIONS
+      # -----------------------------------------------
+      - name: Remove Unwanted Runner Applications
         shell: bash
         run: |
           set -euo pipefail
+
           export DEBIAN_FRONTEND=noninteractive
 
-          # Remove standalone CMake binary
-          if [[ -f /usr/local/bin/cmake ]]; then
-            sudo rm -f /usr/local/bin/cmake
-          fi
-
-          # Remove unwanted APT applications if installed
+          # Remove unwanted APT packages if installed
           packages=(
             firefox
             firefox-esr
+            firefox-locale-en
             microsoft-edge-stable
             cmake
+            cmake-data
+            cmake-curses-gui
+            cmake-qt-gui
+            cmake-doc
             vim
             vim-tiny
             vim-runtime
@@ -108,7 +122,8 @@ jobs:
           remove=()
 
           for pkg in "${packages[@]}"; do
-            status="$(dpkg-query -W -f='${db:Status-Abbrev}' "$pkg" 2>/dev/null || true)"
+            status="$(dpkg-query -W -f='${db:Status-Abbrev}' \
+              "$pkg" 2>/dev/null || true)"
 
             if [[ "$status" == ii* ]]; then
               remove+=("$pkg")
@@ -116,46 +131,127 @@ jobs:
           done
 
           if ((${#remove[@]})); then
+            echo "Purging packages: ${remove[*]}"
             sudo apt-get purge -y "${remove[@]}"
           fi
 
-          # Remove Firefox snap if present
-          if command -v snap >/dev/null 2>&1 && snap list firefox >/dev/null 2>&1; then
-            sudo snap remove firefox
+          # Remove Firefox Snap if present
+          if command -v snap >/dev/null 2>&1; then
+            if snap list firefox >/dev/null 2>&1; then
+              sudo snap remove firefox
+            fi
           fi
 
-          # Verify CMake
-          if command -v cmake >/dev/null 2>&1; then
-            echo "CMake still exists at: $(command -v cmake)"
-          else
-            echo "CMake successfully removed."
+          # Remove standalone CMake binaries
+          for dir in /usr/local/bin /usr/bin; do
+            if [[ -d "$dir" ]]; then
+              sudo find "$dir" -maxdepth 1 \
+                \( -type f -o -type l \) \
+                \( -name cmake -o -name cmake-gui -o -name ccmake \) \
+                -print -delete
+            fi
+          done
+
+          # Remove GitHub hosted-toolcache CMake
+          sudo rm -rf \
+            /opt/hostedtoolcache/CMake \
+            /opt/hostedtoolcache/cmake
+
+          # Remove standalone CMake support directories
+          sudo rm -rf \
+            /usr/local/share/cmake \
+            /usr/local/share/cmake-* \
+            /usr/local/lib/cmake \
+            /usr/local/lib/cmake-* \
+            /usr/share/cmake \
+            /usr/share/cmake-* \
+            /usr/lib/cmake \
+            /usr/lib/cmake-*
+
+          # Remove CMake and Bulk Rename menu shortcuts
+          for dir in \
+            /usr/share/applications \
+            /usr/local/share/applications
+          do
+            if [[ -d "$dir" ]]; then
+              while IFS= read -r -d '' file; do
+                echo "Removing launcher: $file"
+                sudo rm -f "$file"
+              done < <(
+                sudo find "$dir" -maxdepth 1 -type f \
+                  \( -iname '*cmake*.desktop' \
+                     -o -iname '*bulk-rename*.desktop' \
+                     -o -iname '*bulkrename*.desktop' \) \
+                  -print0
+              )
+            fi
+          done
+
+          # Refresh desktop application menu cache if available
+          if command -v update-desktop-database >/dev/null 2>&1; then
+            sudo update-desktop-database /usr/share/applications || true
           fi
 
+          # Clean downloaded package cache
           sudo apt-get clean
 
-      - name: Audit Newly Installed Packages
+          echo "Unwanted application cleanup completed."
+
+      # -----------------------------------------------
+      # 4. VERIFY INSTALLATION
+      # -----------------------------------------------
+      - name: Verify Desktop and Cleanup
         shell: bash
         run: |
           set -euo pipefail
 
-          dpkg-query -W -f='${db:Status-Abbrev}\t${binary:Package}\t${Version}\n' \
-            | awk '$1=="ii"' | sort > /tmp/packages-after.txt
+          echo "===== REQUIRED APPLICATIONS ====="
 
-          echo "===== NEWLY INSTALLED PACKAGES ====="
-          comm -13 \
-            <(cut -f2 /tmp/packages-before.txt | sort) \
-            <(cut -f2 /tmp/packages-after.txt | sort)
+          for app in \
+            google-chrome \
+            chrome-remote-desktop \
+            xfce4-session \
+            xfce4-panel \
+            xfwm4 \
+            xfdesktop \
+            xfce4-settings \
+            thunar \
+            xfce4-terminal
+          do
+            if command -v "$app" >/dev/null 2>&1; then
+              echo "OK: $app"
+            elif dpkg-query -W -f='${db:Status-Abbrev}' \
+              "$app" 2>/dev/null | grep -q '^ii'; then
+              echo "OK: $app (installed package)"
+            else
+              echo "CHECK: $app"
+            fi
+          done
 
-          echo "===== UNWANTED APPLICATION CHECK ====="
+          echo "===== CMAKE EXECUTABLE CHECK ====="
+
+          for dir in /usr/local/bin /usr/bin /opt/hostedtoolcache; do
+            if [[ -d "$dir" ]]; then
+              sudo find "$dir" \
+                \( -name cmake -o -name cmake-gui -o -name ccmake \) \
+                -print 2>/dev/null || true
+            fi
+          done
+
+          echo "===== UNWANTED APT PACKAGE CHECK ====="
+
           for app in firefox firefox-esr microsoft-edge-stable cmake; do
             dpkg-query -W -f='${db:Status-Abbrev} ${binary:Package}\n' \
               "$app" 2>/dev/null || true
           done
 
-          echo "===== PACKAGE COUNTS ====="
-          echo "Before: $(wc -l < /tmp/packages-before.txt)"
-          echo "After: $(wc -l < /tmp/packages-after.txt)"
+          echo "===== PACKAGE COUNT ====="
+          dpkg-query -W -f='${db:Status-Abbrev}\n' \
+            | grep -c '^ii' || true
 
+      # -----------------------------------------------
+      # 5. REGISTER CRD HOST
+      # -----------------------------------------------
       - name: Register CRD Host
         shell: bash
         run: |
@@ -241,6 +337,9 @@ jobs:
           print("CRD host registered successfully.")
           PY
 
+      # -----------------------------------------------
+      # 6. KEEP HOST RUNNING
+      # -----------------------------------------------
       - name: Keep Host Running
         shell: bash
         run: |
@@ -254,6 +353,9 @@ jobs:
 
           echo "CRD session completed."
 
+      # -----------------------------------------------
+      # 7. FINAL DIAGNOSTICS
+      # -----------------------------------------------
       - name: Diagnostics
         if: always()
         shell: bash
@@ -265,7 +367,7 @@ jobs:
           pgrep -af 'thunar|xfce4-panel|xfdesktop' || true
 
           echo "===== CMAKE CHECK ====="
-          command -v cmake || echo "CMake not found"
+          command -v cmake || echo "CMake command not found"
 
           echo "===== DISK USAGE ====="
           df -h
