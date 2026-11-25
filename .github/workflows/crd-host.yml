@@ -28,65 +28,84 @@ jobs:
     timeout-minutes: 240
 
     steps:
-      - name: Install Desktop and CRD
+      - name: Install Minimal Desktop, Chrome and CRD
         shell: bash
         run: |
           set -euo pipefail
 
-          sudo apt-get update
+          export DEBIAN_FRONTEND=noninteractive
 
-          sudo apt-get install -y \
-            xfce4 \
-            xfce4-goodies \
+          sudo apt-get update -qq
+
+          # Minimal XFCE components - no full XFCE or goodies
+          sudo apt-get install -y --no-install-recommends \
             dbus-x11 \
-            x11-xserver-utils \
-            wget \
-            curl \
-            python3
+            xfce4-session \
+            xfce4-panel \
+            xfdesktop4 \
+            xfwm4 \
+            xfce4-terminal \
+            thunar \
+            x11-xserver-utils
 
-          # Install Google Chrome
-          wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
-          sudo apt-get install -y ./google-chrome-stable_current_amd64.deb
+          # Download Chrome
+          curl -fL --retry 3 \
+            -o google-chrome.deb \
+            https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
 
-          # Install Chrome Remote Desktop
-          wget -q https://dl.google.com/linux/direct/chrome-remote-desktop_current_amd64.deb
-          sudo apt-get install -y ./chrome-remote-desktop_current_amd64.deb
+          # Download Chrome Remote Desktop
+          curl -fL --retry 3 \
+            -o chrome-remote-desktop.deb \
+            https://dl.google.com/linux/direct/chrome-remote-desktop_current_amd64.deb
 
-          # Configure XFCE session
-          echo "exec /usr/bin/xfce4-session" > "$HOME/.chrome-remote-desktop-session"
+          # Install only required dependencies
+          sudo apt-get install -y --no-install-recommends \
+            ./google-chrome.deb \
+            ./chrome-remote-desktop.deb
 
-          echo "Desktop and CRD installed successfully."
+          rm -f google-chrome.deb chrome-remote-desktop.deb
+
+          # Configure XFCE
+          echo "exec /usr/bin/xfce4-session" \
+            > "$HOME/.chrome-remote-desktop-session"
+
+          # Clean downloaded package cache
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/*
+
+          echo "Minimal Chrome + CRD installation completed."
 
       - name: Register CRD Host
         shell: bash
-        env:
-          CRD_COMMAND: ${{ inputs.crd_code }}
-          CRD_PIN: ${{ inputs.crd_pin }}
         run: |
           set -euo pipefail
 
-          # Validate PIN
-          if [[ ! "$CRD_PIN" =~ ^[0-9]{6,12}$ ]]; then
-            echo "Invalid CRD PIN."
-            exit 1
-          fi
-
-          # Parse trusted Google command without eval.
-          python3 - <<'PY'
+          python3 <<'PY'
+          import json
           import os
           import shlex
           import subprocess
           import sys
 
-          command = os.environ["CRD_COMMAND"]
-          pin = os.environ["CRD_PIN"]
+          # Read workflow inputs without printing sensitive values.
+          with open(os.environ["GITHUB_EVENT_PATH"], encoding="utf-8") as f:
+              inputs = json.load(f).get("inputs", {})
+
+          command = str(inputs.get("crd_code", ""))
+          pin = str(inputs.get("crd_pin", ""))
+
+          if not command or "\n" in command or "\r" in command:
+              sys.exit("Invalid CRD command.")
+
+          if not pin.isdigit() or not 6 <= len(pin) <= 12:
+              sys.exit("Invalid CRD PIN.")
 
           try:
               args = shlex.split(command)
           except ValueError:
               sys.exit("Invalid command format.")
 
-          # Google command may start with DISPLAY=
+          # Remove optional DISPLAY= prefix.
           if args and args[0].startswith("DISPLAY="):
               args.pop(0)
 
@@ -95,23 +114,38 @@ jobs:
           if not args or args[0] != expected:
               sys.exit("Invalid Google CRD start-host command.")
 
-          # Remove any supplied name/PIN so our fixed values win.
-          clean = []
-          skip_next = False
+          # Validate required Google authorization arguments.
+          if not any(a.startswith("--code=") for a in args):
+              sys.exit("Missing Google authorization code.")
+
+          if not any(a.startswith("--redirect-url=") for a in args):
+              sys.exit("Missing Google redirect URL.")
+
+          # Mask sensitive command and authorization code in logs.
+          print(f"::add-mask::{command}")
+          print(f"::add-mask::{pin}")
 
           for arg in args:
-              if skip_next:
-                  skip_next = False
-                  continue
+              if arg.startswith("--code="):
+                  print(f"::add-mask::{arg.split('=', 1)[1]}")
+
+          # Remove old device name and PIN.
+          clean = [args[0]]
+          i = 1
+
+          while i < len(args):
+              arg = args[i]
 
               if arg in ("--name", "--pin"):
-                  skip_next = True
+                  i += 2
                   continue
 
               if arg.startswith("--name=") or arg.startswith("--pin="):
+                  i += 1
                   continue
 
               clean.append(arg)
+              i += 1
 
           clean.extend([
               "--name=Lokendra-CRD",
@@ -121,14 +155,14 @@ jobs:
           env = os.environ.copy()
           env["DISPLAY"] = ""
 
-          print("Registering CRD host: Lokendra-CRD")
+          print("Registering device: Lokendra-CRD")
 
           result = subprocess.run(clean, env=env)
 
           if result.returncode != 0:
-              sys.exit("CRD host registration failed.")
+              sys.exit("CRD registration failed.")
 
-          print("CRD host registration command completed.")
+          print("CRD host registered successfully.")
           PY
 
       - name: Keep Host Running
@@ -136,19 +170,20 @@ jobs:
         run: |
           set -e
 
-          echo "CRD host is running."
-          echo "Remote device name: Lokendra-CRD"
+          echo "CRD host running: Lokendra-CRD"
 
-          for i in $(seq 1 225); do
+          for ((i=0; i<225; i++)); do
             sleep 60
           done
 
-          echo "CRD session time completed."
+          echo "CRD session completed."
 
       - name: Diagnostics
         if: always()
         shell: bash
         run: |
-          echo "CRD diagnostics:"
-          pgrep -af 'chrome-remote-desktop|xfce4-session' || true
+          echo "CRD processes:"
+          pgrep -af 'chrome-remote-desktop|xfce4-session|xfwm4' || true
+
+          echo "Disk usage:"
           df -h /
